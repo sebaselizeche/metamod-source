@@ -31,6 +31,7 @@
 #include <cctype>
 #include <cstdarg>
 #include <cstdlib>
+#include <vector>
 
 #include "loader.h"
 #include "utility.h"
@@ -380,6 +381,7 @@ struct DynLibInfo
 {
 	void *baseAddress;
 	size_t memorySize;
+	std::vector<std::pair<void*, void*>> searchablememory;
 };
 
 static bool
@@ -504,19 +506,32 @@ mm_GetLibraryInfo(const void *libPtr, DynLibInfo &lib)
 
 	lib.memorySize = 0;
 	size_t minAddr = SIZE_MAX, maxAddr = 0;
+	size_t pageSize = getpagesize();
+	size_t pageMask = pageSize - 1;
 	for (uint16_t i = 0; i < phdrCount; i++)
 	{
 		ElfPHeader &hdr = phdr[i];
 		if (hdr.p_type == PT_LOAD)
 		{
-			if (hdr.p_vaddr < minAddr)
+			size_t start = hdr.p_vaddr & ~pageMask;
+			size_t end   = (hdr.p_vaddr + hdr.p_filesz + pageMask) & ~pageMask;
+
+			if (start < minAddr)
 			{
-				minAddr = hdr.p_vaddr;
+				minAddr = start;
 			}
-			if ((hdr.p_vaddr + hdr.p_memsz) > maxAddr)
+			if (end > maxAddr)
 			{
-				maxAddr = hdr.p_vaddr + hdr.p_memsz;
+				maxAddr = end;
 			}
+
+			/*fprintf(stdout, "PT_LOAD vaddr=0x%lx memsz=0x%lx filesz=0x%lx flags=%s%s%s\n",
+				(unsigned long)hdr.p_vaddr,
+				(unsigned long)hdr.p_memsz,
+				(unsigned long)hdr.p_filesz,
+				(hdr.p_flags & PF_R) ? "r" : "-",
+				(hdr.p_flags & PF_W) ? "w" : "-",
+				(hdr.p_flags & PF_X) ? "x" : "-");*/
 		}
 	}
 	if (minAddr > maxAddr)
@@ -524,6 +539,22 @@ mm_GetLibraryInfo(const void *libPtr, DynLibInfo &lib)
 		return false;
 	}
 	lib.memorySize = maxAddr - minAddr;
+
+	// Do a second pass, and this time collect the searchable memory
+	lib.searchablememory.clear();
+	for (uint16_t i = 0; i < phdrCount; i++)
+	{
+		ElfPHeader &hdr = phdr[i];
+		if (hdr.p_type == PT_LOAD)
+		{
+			size_t start = (hdr.p_vaddr - minAddr) & ~pageMask;
+			size_t end   = ((hdr.p_vaddr - minAddr) + hdr.p_filesz + pageMask) & ~pageMask;
+
+			if ((hdr.p_flags & PF_R) == PF_R) {
+				lib.searchablememory.push_back(std::make_pair((void*)(baseAddr + start), (void*)(baseAddr + end)));
+			}
+		}
+	}
 
 #elif defined __APPLE__
 
@@ -604,8 +635,7 @@ mm_GetLibraryInfo(const void *libPtr, DynLibInfo &lib)
 void *mm_FindPattern(const void *libPtr, const char *pattern, size_t len)
 {
 	DynLibInfo lib;
-	bool found;
-	char *ptr, *end;
+	bool found = false;
 
 	memset(&lib, 0, sizeof(DynLibInfo));
 
@@ -614,25 +644,52 @@ void *mm_FindPattern(const void *libPtr, const char *pattern, size_t len)
 		return NULL;
 	}
 
-	ptr = reinterpret_cast<char *>(lib.baseAddress);
-	end = ptr + lib.memorySize - len;
+	if (lib.searchablememory.size()) {
+		// New method
+		for (const auto& search : lib.searchablememory) {
+			char* ptr = (char*)search.first;
+			char* end = (char*)search.second - len;
 
-	while (ptr < end)
-	{
-		found = true;
-		for (size_t i = 0; i < len; i++)
-		{
-			if (pattern[i] != '\x2A' && pattern[i] != ptr[i])
+			while (ptr < end)
 			{
-				found = false;
-				break;
+				found = true;
+				for (size_t i = 0; i < len; i++)
+				{
+					if (pattern[i] != '\x2A' && pattern[i] != ptr[i])
+					{
+						found = false;
+						break;
+					}
+				}
+
+				if (found)
+					return ptr;
+
+				ptr++;
 			}
 		}
+	} else {
+		// Old unsafe method
+		char* ptr = reinterpret_cast<char *>(lib.baseAddress);
+		char* end = ptr + lib.memorySize - len;
 
-		if (found)
-			return ptr;
+		while (ptr < end)
+		{
+			found = true;
+			for (size_t i = 0; i < len; i++)
+			{
+				if (pattern[i] != '\x2A' && pattern[i] != ptr[i])
+				{
+					found = false;
+					break;
+				}
+			}
 
-		ptr++;
+			if (found)
+				return ptr;
+
+			ptr++;
+		}
 	}
 
 	return NULL;
