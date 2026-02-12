@@ -443,6 +443,7 @@ mm_GetLibraryInfo(const void *libPtr, DynLibInfo &lib)
 
 	/* Finally, we can do this */
 	lib.memorySize = opt->SizeOfImage;
+	lib.searchablememory.push_back(std::make_pair((void*)baseAddr, (void*)(baseAddr + lib.memorySize)));
 
 #elif defined __linux__
 
@@ -624,7 +625,7 @@ mm_GetLibraryInfo(const void *libPtr, DynLibInfo &lib)
 
 		seg = (MachSegment  *)((uintptr_t)seg + seg->cmdsize);
 	}
-
+	lib.searchablememory.push_back(std::make_pair((void*)baseAddr, (void*)(baseAddr + lib.memorySize)));
 #endif
 
 	lib.baseAddress = reinterpret_cast<void *>(baseAddr);
@@ -643,35 +644,10 @@ void *mm_FindPattern(const void *libPtr, const char *pattern, size_t len)
 	{
 		return NULL;
 	}
-
-	if (lib.searchablememory.size()) {
-		// New method
-		for (const auto& search : lib.searchablememory) {
-			char* ptr = (char*)search.first;
-			char* end = (char*)search.second - len;
-
-			while (ptr < end)
-			{
-				found = true;
-				for (size_t i = 0; i < len; i++)
-				{
-					if (pattern[i] != '\x2A' && pattern[i] != ptr[i])
-					{
-						found = false;
-						break;
-					}
-				}
-
-				if (found)
-					return ptr;
-
-				ptr++;
-			}
-		}
-	} else {
-		// Old unsafe method
-		char* ptr = reinterpret_cast<char *>(lib.baseAddress);
-		char* end = ptr + lib.memorySize - len;
+		
+	for (const auto& search : lib.searchablememory) {
+		char* ptr = (char*)search.first;
+		char* end = (char*)search.second - len;
 
 		while (ptr < end)
 		{
@@ -684,7 +660,6 @@ void *mm_FindPattern(const void *libPtr, const char *pattern, size_t len)
 					break;
 				}
 			}
-
 			if (found)
 				return ptr;
 
